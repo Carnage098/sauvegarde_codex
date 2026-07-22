@@ -75,6 +75,40 @@ class CodexParserTests(unittest.TestCase):
             CodexClient.normalize_article_url("https://example.com/article/test/")
         )
 
+    def test_article_urls_from_javascript_data(self) -> None:
+        html = r'''
+        <html><head><script>
+        window.__DATA__ = {"url":"https:\\/\\/codexygo.fr\\/article\\/test-123\\/"};
+        </script></head><body></body></html>
+        '''
+        urls = CodexClient._extract_article_urls_from_html(html)
+        self.assertEqual(
+            urls,
+            ["https://codexygo.fr/article/test-123/"],
+        )
+
+    def test_recent_section_urls(self) -> None:
+        html = """
+        <html><body>
+          <article><a href="/article/ancien-lien-1/">Lien dans le texte</a></article>
+          <aside>
+            <h3>Articles récents</h3>
+            <div>
+              <a href="/article/nouveau-516/">Nouveau</a>
+              <a href="https://codexygo.fr/article/nouveau-515/">Deuxième</a>
+            </div>
+          </aside>
+        </body></html>
+        """
+        urls = CodexClient._extract_recent_article_urls_from_html(html)
+        self.assertEqual(
+            urls,
+            [
+                "https://codexygo.fr/article/nouveau-516/",
+                "https://codexygo.fr/article/nouveau-515/",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
