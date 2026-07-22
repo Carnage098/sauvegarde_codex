@@ -13,6 +13,12 @@ from xml.etree import ElementTree
 
 import aiohttp
 from bs4 import BeautifulSoup, Tag
+from playwright.async_api import (
+    Browser,
+    Playwright,
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
 
 from models.article import CodexArticle
 
@@ -61,6 +67,9 @@ CATEGORY_SLUGS: dict[str, str] = {
 class CodexClient:
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._browser_lock = asyncio.Lock()
 
     async def open(self) -> None:
         if self._session and not self._session.closed:
@@ -87,6 +96,14 @@ class CodexClient:
         )
 
     async def close(self) -> None:
+        if self._browser is not None:
+            await self._browser.close()
+            self._browser = None
+
+        if self._playwright is not None:
+            await self._playwright.stop()
+            self._playwright = None
+
         if self._session and not self._session.closed:
             await self._session.close()
         self._session = None
@@ -120,6 +137,71 @@ class CodexClient:
                     await asyncio.sleep(2**attempt)
 
         raise RuntimeError(f"Impossible de récupérer {url}") from last_error
+
+    async def _ensure_browser(self) -> Browser:
+        if self._browser is not None and self._browser.is_connected():
+            return self._browser
+
+        async with self._browser_lock:
+            if self._browser is not None and self._browser.is_connected():
+                return self._browser
+
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
+
+            self._browser = await self._playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ],
+            )
+            return self._browser
+
+    async def _fetch_rendered_homepage_urls(self) -> list[str]:
+        """Rend l'accueil avec Chromium pour exécuter le JavaScript du site."""
+        browser = await self._ensure_browser()
+        page = await browser.new_page(
+            locale="fr-FR",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+        )
+
+        try:
+            await page.goto(
+                CODEX_BASE_URL,
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+
+            try:
+                await page.wait_for_selector(
+                    'a[href*="/article/"]',
+                    timeout=15_000,
+                )
+            except PlaywrightTimeoutError:
+                # Le contenu peut arriver tardivement sans déclencher le sélecteur.
+                await page.wait_for_timeout(3_000)
+
+            rendered_html = await page.content()
+            urls = self._extract_article_urls_from_html(rendered_html)
+
+            if urls:
+                LOGGER.info(
+                    "%s lien(s) d'article trouvé(s) après rendu JavaScript.",
+                    len(urls),
+                )
+            else:
+                LOGGER.warning(
+                    "Le rendu JavaScript de l'accueil ne contient toujours aucun lien d'article."
+                )
+
+            return urls
+        finally:
+            await page.close()
 
     @staticmethod
     def normalize_article_url(href: str) -> str | None:
@@ -180,8 +262,21 @@ class CodexClient:
                 len(html),
             )
 
-        # Certaines versions du site chargent les articles de l'accueil en JavaScript,
-        # alors que les pages de catégories restent rendues côté serveur.
+        # Le HTML brut de Codex peut ne contenir aucun lien : on exécute alors
+        # le JavaScript de la page dans Chromium avant de tenter les autres secours.
+        try:
+            rendered_urls = await self._fetch_rendered_homepage_urls()
+        except Exception:
+            LOGGER.exception(
+                "Échec du rendu JavaScript de l'accueil Codex YGO."
+            )
+            rendered_urls = []
+
+        if rendered_urls:
+            return rendered_urls
+
+        # Certaines versions du site chargent aussi les catégories en JavaScript.
+        # On garde néanmoins leur HTML brut comme solution de secours légère.
         category_urls = (
             "https://codexygo.fr/categorie/actualites/ocg-tcg/",
             "https://codexygo.fr/categorie/actualites/rush-duel/",
