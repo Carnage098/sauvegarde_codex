@@ -27,6 +27,13 @@ def _required_int(name: str) -> int:
     return value
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().casefold() in {"1", "true", "yes", "oui", "on"}
+
+
 def _positive_int(name: str, default: int, minimum: int, maximum: int) -> int:
     raw_value = os.getenv(name, str(default)).strip()
 
@@ -44,9 +51,11 @@ class Settings:
     codex_channel_id: int
     codex_ping_role_id: int | None
     discord_guild_id: int | None
+    sync_commands: bool
     check_interval_minutes: int
     max_articles_per_check: int
     first_run_mode: str
+    reseed_on_start: bool
     database_path: Path
     log_level: str
 
@@ -60,11 +69,16 @@ class Settings:
         if first_run_mode not in {"seed", "publish"}:
             raise RuntimeError("CODEX_FIRST_RUN_MODE doit être 'seed' ou 'publish'.")
 
+        database_raw = os.getenv("DATABASE_PATH", "data/codex_news.sqlite3").strip()
+        if not database_raw:
+            database_raw = "data/codex_news.sqlite3"
+
         return cls(
             discord_token=token,
             codex_channel_id=_required_int("CODEX_CHANNEL_ID"),
             codex_ping_role_id=_optional_int("CODEX_PING_ROLE_ID"),
             discord_guild_id=_optional_int("DISCORD_GUILD_ID"),
+            sync_commands=_bool_env("SYNC_COMMANDS", False),
             check_interval_minutes=_positive_int(
                 "CODEX_CHECK_INTERVAL_MINUTES",
                 default=10,
@@ -78,8 +92,7 @@ class Settings:
                 maximum=20,
             ),
             first_run_mode=first_run_mode,
-            database_path=Path(
-                os.getenv("DATABASE_PATH", "data/codex_news.sqlite3").strip()
-            ),
-            log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+            reseed_on_start=_bool_env("CODEX_RESEED_ON_START", False),
+            database_path=Path(database_raw),
+            log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         )
