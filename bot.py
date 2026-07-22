@@ -23,12 +23,20 @@ class CodexBot(commands.Bot):
             await self.load_extension(extension)
             LOGGER.info("Cog chargé : %s", extension)
 
+        # Discord limite fortement les PUT répétés sur les commandes.
+        # On ne synchronise donc que lorsque SYNC_COMMANDS=true.
+        if not self.settings.sync_commands:
+            LOGGER.info(
+                "Synchronisation des commandes ignorée (SYNC_COMMANDS=false)."
+            )
+            return
+
         if self.settings.discord_guild_id:
             guild = discord.Object(id=self.settings.discord_guild_id)
             self.tree.copy_global_to(guild=guild)
             synced = await self.tree.sync(guild=guild)
             LOGGER.info(
-                "%s commande(s) synchronisée(s) sur le serveur de développement.",
+                "%s commande(s) synchronisée(s) sur le serveur configuré.",
                 len(synced),
             )
         else:
