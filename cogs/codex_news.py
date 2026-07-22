@@ -30,9 +30,21 @@ class CodexNews(commands.Cog):
         self.client = CodexClient()
         self.repository = ArticleRepository(self.settings.database_path)
         self.check_lock = asyncio.Lock()
+        self._reseed_completed = False
+
         self.article_check_loop.change_interval(
             minutes=self.settings.check_interval_minutes
         )
+
+    @property
+    def reseed_enabled(self) -> bool:
+        # Compatibilité avec une ancienne version de config.py : le Cog ne
+        # plante plus si Railway déploie temporairement des fichiers décalés.
+        return bool(getattr(self.settings, "reseed_on_start", False))
+
+    @property
+    def first_run_mode(self) -> str:
+        return str(getattr(self.settings, "first_run_mode", "seed"))
 
     async def cog_load(self) -> None:
         await self.client.open()
@@ -79,23 +91,28 @@ class CodexNews(commands.Cog):
         async with self.check_lock:
             urls = await self.client.fetch_homepage_article_urls()
             if not urls:
-                LOGGER.warning("Aucun article Codex YGO trouvé par les différentes méthodes.")
+                LOGGER.warning(
+                    "Aucun article Codex YGO trouvé par les différentes méthodes."
+                )
                 return 0
 
-            if self.settings.reseed_on_start:
+            # Resynchronisation exceptionnelle après une grosse correction du
+            # parseur. Elle ne s'exécute qu'une fois par démarrage.
+            if self.reseed_enabled and not self._reseed_completed:
                 for url in urls:
                     await self.repository.seed_url(url)
 
+                self._reseed_completed = True
                 LOGGER.info(
                     "%s article(s) resynchronisé(s) sans publication. "
-                    "Remets CODEX_RESEED_ON_START=false après ce déploiement.",
+                    "Tu peux maintenant remettre CODEX_RESEED_ON_START=false.",
                     len(urls),
                 )
                 return 0
 
             database_is_empty = await self.repository.is_empty()
 
-            if database_is_empty and self.settings.first_run_mode == "seed":
+            if database_is_empty and self.first_run_mode == "seed":
                 for url in urls:
                     await self.repository.seed_url(url)
 
@@ -105,21 +122,30 @@ class CodexNews(commands.Cog):
                 )
                 return 0
 
-            new_urls: list[str] = []
-            for url in urls:
-                if not await self.repository.contains(url):
-                    new_urls.append(url)
-
+            new_urls = [
+                url for url in urls if not await self.repository.contains(url)
+            ]
             if not new_urls:
+                LOGGER.info("Aucun nouvel article Codex YGO détecté.")
                 return 0
 
-            # La page d'accueil est généralement du plus récent au plus ancien.
-            selected_urls = new_urls[: self.settings.max_articles_per_check]
-            sent_count = 0
+            max_count = self.settings.max_articles_per_check
 
-            for url in reversed(selected_urls):
+            # On lit les métadonnées et on trie selon la vraie date publiée.
+            # Cela empêche un ancien lien placé en premier dans le DOM d'être
+            # traité comme le dernier article.
+            candidates = await self.client.fetch_articles(new_urls[:20])
+            candidates.sort(
+                key=self.client._article_date_key,
+                reverse=True,
+            )
+            selected_articles = candidates[:max_count]
+
+            sent_count = 0
+            # Discord reçoit les éléments du plus ancien au plus récent afin que
+            # le plus récent reste visuellement en bas du salon.
+            for article in reversed(selected_articles):
                 try:
-                    article = await self.client.fetch_article(url)
                     message = await self._send_article(article)
                     await self.repository.save(
                         article,
@@ -133,8 +159,8 @@ class CodexNews(commands.Cog):
                     )
                     await asyncio.sleep(2)
                 except Exception:
-                    # L'article n'est pas sauvegardé : il sera retenté à la prochaine passe.
-                    LOGGER.exception("Échec de publication de %s", url)
+                    # L'article n'est pas sauvegardé : il sera retenté ensuite.
+                    LOGGER.exception("Échec de publication de %s", article.url)
 
             return sent_count
 
@@ -156,15 +182,14 @@ class CodexNews(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         try:
-            urls = await self.client.fetch_homepage_article_urls()
-            if not urls:
+            article = await self.client.fetch_latest_article()
+            if article is None:
                 await interaction.followup.send(
                     "Aucun article n'a été trouvé sur Codex YGO.",
                     ephemeral=True,
                 )
                 return
 
-            article = await self.client.fetch_article(urls[0])
             await interaction.followup.send(
                 embed=CodexEmbedFactory.build(article),
                 view=ArticleLinkView(article),
@@ -259,12 +284,12 @@ class CodexNews(commands.Cog):
         )
         embed.add_field(
             name="Premier lancement",
-            value=self.settings.first_run_mode,
+            value=self.first_run_mode,
             inline=True,
         )
         embed.add_field(
             name="Resynchronisation",
-            value="Active" if self.settings.reseed_on_start else "Inactive",
+            value="Active" if self.reseed_enabled else "Inactive",
             inline=True,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -277,7 +302,7 @@ class CodexNews(commands.Cog):
         if isinstance(error, app_commands.MissingPermissions):
             message = "Tu dois avoir la permission **Gérer le serveur**."
         else:
-            LOGGER.exception("Erreur de commande Codex", exc_info=error)
+            LOGGER.error("Erreur de commande Codex : %r", error, exc_info=error)
             message = "Une erreur inattendue est survenue."
 
         if interaction.response.is_done():
