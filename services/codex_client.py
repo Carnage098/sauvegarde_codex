@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse, urlunparse
 from xml.etree import ElementTree
@@ -255,9 +255,11 @@ class CodexClient:
                 len(html),
             )
         else:
-            LOGGER.warning(
-                "Aucun article trouvé directement dans l'accueil "
-                "(titre=%r, taille=%s). Tentative via les catégories et sitemaps.",
+            # C'est le fonctionnement attendu du site actuel : le HTML brut
+            # ne contient pas les cartes, puis Chromium les rend en JavaScript.
+            LOGGER.info(
+                "Le HTML brut de l'accueil ne contient aucun article "
+                "(titre=%r, taille=%s). Passage au rendu JavaScript.",
                 page_title,
                 len(html),
             )
@@ -542,6 +544,49 @@ class CodexClient:
     async def fetch_article(self, url: str) -> CodexArticle:
         html = await self._get_text(url)
         return self.parse_article_html(url, html)
+
+    async def fetch_articles(
+        self,
+        urls: Iterable[str],
+        *,
+        concurrency: int = 4,
+    ) -> list[CodexArticle]:
+        """Récupère plusieurs articles sans surcharger le site."""
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+
+        async def fetch_one(url: str) -> CodexArticle | None:
+            async with semaphore:
+                try:
+                    return await self.fetch_article(url)
+                except Exception:
+                    LOGGER.exception("Impossible de lire les métadonnées de %s", url)
+                    return None
+
+        results = await asyncio.gather(*(fetch_one(url) for url in urls))
+        return [article for article in results if article is not None]
+
+    @staticmethod
+    def _article_date_key(article: CodexArticle) -> datetime:
+        published_at = article.published_at
+        if published_at is None:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        if published_at.tzinfo is None:
+            return published_at.replace(tzinfo=timezone.utc)
+        return published_at.astimezone(timezone.utc)
+
+    async def fetch_latest_article(self) -> CodexArticle | None:
+        """Trouve le véritable article le plus récent d'après sa date."""
+        urls = await self.fetch_homepage_article_urls()
+        if not urls:
+            return None
+
+        # L'accueil rendu contient actuellement une petite liste. On limite à 20
+        # pour garder une charge raisonnable si le site en expose davantage.
+        articles = await self.fetch_articles(urls[:20])
+        if not articles:
+            return None
+
+        return max(articles, key=self._article_date_key)
 
     @classmethod
     def parse_article_html(cls, url: str, html: str) -> CodexArticle:
