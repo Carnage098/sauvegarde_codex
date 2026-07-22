@@ -465,9 +465,19 @@ class ArticleRepository:
             placeholders = ",".join("?" for _ in chunk)
             async with database.execute(
                 f"""
-                SELECT url, title, description, search_text
-                FROM articles
-                WHERE url IN ({placeholders})
+                SELECT
+                    a.id,
+                    a.url,
+                    a.title,
+                    a.description,
+                    a.search_text,
+                    (
+                        SELECT COUNT(*)
+                        FROM article_categories ac
+                        WHERE ac.article_id = a.id
+                    ) AS category_count
+                FROM articles a
+                WHERE a.url IN ({placeholders})
                 """,
                 tuple(chunk),
             ) as cursor:
@@ -479,6 +489,7 @@ class ArticleRepository:
                     title in _PLACEHOLDER_TITLES
                     or not row["description"]
                     or not row["search_text"]
+                    or int(row["category_count"] or 0) == 0
                 ):
                     result.append(str(row["url"]))
 
