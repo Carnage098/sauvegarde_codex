@@ -79,7 +79,7 @@ class CodexNews(commands.Cog):
         async with self.check_lock:
             urls = await self.client.fetch_homepage_article_urls()
             if not urls:
-                LOGGER.warning("Aucun lien /article/ trouvé sur la page d'accueil.")
+                LOGGER.warning("Aucun article Codex YGO trouvé par les différentes méthodes.")
                 return 0
 
             database_is_empty = await self.repository.is_empty()
