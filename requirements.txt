@@ -3,3 +3,4 @@ aiohttp>=3.11,<4.0
 aiosqlite>=0.21,<1.0
 beautifulsoup4>=4.13,<5.0
 python-dotenv>=1.1,<2.0
+playwright==1.60.0
