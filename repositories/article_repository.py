@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import aiosqlite
+from rapidfuzz import fuzz
 
 from models.article import CodexArticle
 from models.article_record import ArticleRecord
@@ -615,17 +616,20 @@ class ArticleRepository:
         category: str | None = None,
         limit: int = 25,
     ) -> list[ArticleRecord]:
+        """Recherche tolérante aux fautes, mots incomplets et ordre différent.
+
+        La base étant une bibliothèque de taille raisonnable, on récupère un
+        ensemble large de candidats puis on les classe en Python avec
+        RapidFuzz. Cela évite qu'une faute comme ``banlsit`` élimine tous les
+        résultats au niveau SQL.
+        """
         normalized_query = normalize_search_text(query)
-        tokens = [token for token in normalized_query.split() if len(token) >= 2]
+        tokens = [token for token in normalized_query.split() if token]
         normalized_category = normalize_search_text(category)
         database = self._require_database()
 
         conditions: list[str] = []
         parameters: list[object] = []
-
-        for token in tokens:
-            conditions.append("a.search_text LIKE ?")
-            parameters.append(f"%{token}%")
 
         if normalized_category:
             conditions.append(
@@ -641,8 +645,15 @@ class ArticleRepository:
             )
             parameters.append(normalized_category)
 
+        # Pour un texte très court, un préfiltre SQL évite de proposer des
+        # articles sans rapport. À partir de 3 caractères, on garde un groupe
+        # beaucoup plus large afin de tolérer les fautes de frappe.
+        if normalized_query and len(normalized_query) <= 2:
+            conditions.append("a.search_text LIKE ?")
+            parameters.append(f"%{normalized_query}%")
+
         where_clause = " AND ".join(conditions) if conditions else "1=1"
-        candidate_limit = max(50, min(250, limit * 8))
+        candidate_limit = max(150, min(1_000, limit * 30))
         parameters.append(candidate_limit)
 
         async with database.execute(
@@ -661,35 +672,114 @@ class ArticleRepository:
         if not normalized_query:
             return records[:limit]
 
-        def score(record: ArticleRecord) -> tuple[int, float]:
+        def score(
+            record: ArticleRecord,
+        ) -> tuple[float, float, bool, float]:
             article = record.article
             normalized_title = normalize_search_text(article.title)
             normalized_description = normalize_search_text(article.description)
             normalized_categories = normalize_search_text(" ".join(article.categories))
+            normalized_slug = normalize_search_text(
+                article.url.rstrip("/").rsplit("/", 1)[-1].replace("-", " ")
+            )
+            searchable = " ".join(
+                value
+                for value in (
+                    normalized_title,
+                    normalized_description,
+                    normalized_categories,
+                    normalized_slug,
+                )
+                if value
+            )
 
-            value = 0
+            direct_match = any(
+                normalized_query in value
+                for value in (
+                    normalized_title,
+                    normalized_description,
+                    normalized_categories,
+                    normalized_slug,
+                )
+                if value
+            )
+
+            title_wratio = fuzz.WRatio(normalized_query, normalized_title)
+            title_partial = fuzz.partial_ratio(normalized_query, normalized_title)
+            title_tokens = fuzz.token_set_ratio(normalized_query, normalized_title)
+            slug_wratio = fuzz.WRatio(normalized_query, normalized_slug)
+            full_tokens = fuzz.token_set_ratio(normalized_query, searchable)
+            best_similarity = max(
+                title_wratio,
+                title_partial,
+                title_tokens,
+                slug_wratio,
+                full_tokens,
+            )
+
+            value = 0.0
+
+            # Les correspondances exactes et les débuts de titre restent
+            # prioritaires devant les correspondances floues.
             if normalized_title == normalized_query:
-                value += 1_000
+                value += 2_000
             if normalized_title.startswith(normalized_query):
-                value += 300
+                value += 900
             if normalized_query in normalized_title:
-                value += 200
+                value += 700
+            if normalized_query in normalized_slug:
+                value += 450
+            if normalized_query in normalized_categories:
+                value += 250
+            if normalized_query in normalized_description:
+                value += 120
+
+            # RapidFuzz reconnaît les fautes, mots partiels et mots dans un
+            # ordre différent. Le titre reçoit le poids le plus important.
+            value += title_wratio * 6.0
+            value += title_partial * 3.0
+            value += title_tokens * 3.0
+            value += slug_wratio * 2.0
+            value += full_tokens * 1.5
 
             for token in tokens:
                 if token in normalized_title:
-                    value += 60
+                    value += 90
+                elif len(token) >= 3:
+                    value += fuzz.partial_ratio(token, normalized_title) * 0.8
                 if token in normalized_categories:
-                    value += 25
+                    value += 35
                 if token in normalized_description:
-                    value += 8
+                    value += 12
 
             published_timestamp = (
                 article.published_at.timestamp() if article.published_at else 0.0
             )
-            return value, published_timestamp
+            return value, published_timestamp, direct_match, best_similarity
 
-        records.sort(key=score, reverse=True)
-        return records[:limit]
+        scored_records = [(record, score(record)) for record in records]
+        scored_records.sort(
+            key=lambda item: (item[1][0], item[1][1]),
+            reverse=True,
+        )
+
+        # Pour une saisie très courte, on exige une grande ressemblance afin
+        # d'éviter des suggestions aléatoires. Les requêtes plus longues
+        # tolèrent davantage les fautes de frappe.
+        query_length = len(normalized_query.replace(" ", ""))
+        if query_length <= 3:
+            minimum_similarity = 88.0
+        elif query_length <= 5:
+            minimum_similarity = 74.0
+        else:
+            minimum_similarity = 57.0
+
+        filtered = [
+            record
+            for record, (_, _, direct_match, best_similarity) in scored_records
+            if direct_match or best_similarity >= minimum_similarity
+        ]
+        return filtered[:limit]
 
     async def category_stats(self) -> list[tuple[str, int]]:
         database = self._require_database()
