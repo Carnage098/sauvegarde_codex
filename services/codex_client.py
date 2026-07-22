@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import json
 import logging
 import re
@@ -8,6 +9,7 @@ import unicodedata
 from datetime import datetime
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse, urlunparse
+from xml.etree import ElementTree
 
 import aiohttp
 from bs4 import BeautifulSoup, Tag
@@ -60,11 +62,20 @@ class CodexClient:
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
             headers={
+                # Codex YGO peut servir une page différente aux User-Agent de bots.
+                # On utilise donc des en-têtes proches d'un navigateur classique.
                 "User-Agent": (
-                    "CodexYGO-Discord-News-Bot/1.0 "
-                    "(+https://codexygo.fr/; respectful article notifier)"
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0.0.0 Safari/537.36"
+                ),
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "image/avif,image/webp,*/*;q=0.8"
                 ),
                 "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.7",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
             },
         )
 
@@ -126,23 +137,189 @@ class CodexClient:
         return urlunparse(normalized)
 
     async def fetch_homepage_article_urls(self) -> list[str]:
+        """
+        Récupère les articles récents avec plusieurs stratégies.
+
+        Codex YGO peut placer les URLs dans des balises HTML, dans des données
+        JSON JavaScript, ou ne les exposer que dans un sitemap. Le bot essaye
+        donc ces méthodes dans cet ordre afin d'éviter les faux résultats vides.
+        """
         html = await self._get_text(CODEX_BASE_URL)
+        urls = self._extract_article_urls_from_html(html)
+
+        if urls:
+            LOGGER.info(
+                "%s lien(s) d'article trouvé(s) dans la page d'accueil.",
+                len(urls),
+            )
+            return urls
+
         soup = BeautifulSoup(html, "html.parser")
+        page_title = soup.title.get_text(" ", strip=True) if soup.title else "sans titre"
+        body_preview = soup.get_text(" ", strip=True)[:300].casefold()
+
+        if any(marker in body_preview for marker in ("cloudflare", "just a moment", "captcha")):
+            LOGGER.warning(
+                "Codex YGO a probablement renvoyé une page de protection anti-bot "
+                "(titre=%r, taille=%s).",
+                page_title,
+                len(html),
+            )
+        else:
+            LOGGER.warning(
+                "Aucun article trouvé directement dans l'accueil "
+                "(titre=%r, taille=%s). Tentative via les catégories et sitemaps.",
+                page_title,
+                len(html),
+            )
+
+        # Certaines versions du site chargent les articles de l'accueil en JavaScript,
+        # alors que les pages de catégories restent rendues côté serveur.
+        category_urls = (
+            "https://codexygo.fr/categorie/actualites/ocg-tcg/",
+            "https://codexygo.fr/categorie/actualites/rush-duel/",
+            "https://codexygo.fr/categorie/dossiers/recap/",
+            "https://codexygo.fr/categorie/dossiers/focus/",
+            "https://codexygo.fr/categorie/dossiers/rulings/",
+        )
+
+        combined: list[str] = []
+        seen: set[str] = set()
+
+        for category_url in category_urls:
+            try:
+                category_html = await self._get_text(category_url)
+            except Exception:
+                LOGGER.debug(
+                    "Impossible de lire la catégorie %s",
+                    category_url,
+                    exc_info=True,
+                )
+                continue
+
+            for url in self._extract_article_urls_from_html(category_html):
+                if url not in seen:
+                    seen.add(url)
+                    combined.append(url)
+
+        if combined:
+            LOGGER.info(
+                "%s lien(s) d'article trouvé(s) via les catégories.",
+                len(combined),
+            )
+            return combined
+
+        sitemap_urls = await self._fetch_sitemap_article_urls()
+        if sitemap_urls:
+            LOGGER.info(
+                "%s lien(s) d'article trouvé(s) via un sitemap.",
+                len(sitemap_urls),
+            )
+            return sitemap_urls
+
+        return []
+
+    @classmethod
+    def _extract_article_urls_from_html(cls, raw_html: str) -> list[str]:
+        """Extrait les URLs depuis le HTML visible et les scripts JSON intégrés."""
+        decoded_html = html_lib.unescape(raw_html)
+        decoded_html = (
+            decoded_html
+            .replace(r"\u002F", "/")
+            .replace(r"\u002f", "/")
+            .replace(r"\u003A", ":")
+            .replace(r"\u003a", ":")
+        )
+        # Accepte aussi les JSON doublement échappés : \\/article\\/.
+        decoded_html = re.sub(r"\\+/", "/", decoded_html)
+
+        candidates: list[str] = []
+        soup = BeautifulSoup(decoded_html, "html.parser")
+
+        # Première méthode : les véritables liens HTML.
+        for anchor in soup.find_all("a", href=True):
+            href = anchor.get("href")
+            if isinstance(href, str):
+                candidates.append(href)
+
+        # Deuxième méthode : URLs stockées dans __NEXT_DATA__, JSON-LD, scripts, etc.
+        article_pattern = re.compile(
+            r"(?:(?:https?:)?//(?:www\.)?codexygo\.fr)?"
+            r"/article/[^\s\"'<>\\?#]+",
+            flags=re.IGNORECASE,
+        )
+        candidates.extend(match.group(0) for match in article_pattern.finditer(decoded_html))
 
         urls: list[str] = []
         seen: set[str] = set()
 
-        for anchor in soup.select('a[href*="/article/"]'):
-            href = anchor.get("href")
-            if not isinstance(href, str):
-                continue
-
-            normalized = self.normalize_article_url(href)
+        for candidate in candidates:
+            normalized = cls.normalize_article_url(candidate)
             if normalized and normalized not in seen:
                 seen.add(normalized)
                 urls.append(normalized)
 
         return urls
+
+    async def _fetch_sitemap_article_urls(self) -> list[str]:
+        """Essaye les emplacements de sitemap courants sans ajouter de dépendance."""
+        sitemap_candidates = (
+            "https://codexygo.fr/sitemap.xml",
+            "https://codexygo.fr/sitemap_index.xml",
+            "https://codexygo.fr/article-sitemap.xml",
+            "https://codexygo.fr/post-sitemap.xml",
+        )
+
+        collected: list[str] = []
+        seen: set[str] = set()
+
+        async def parse_sitemap(url: str, *, allow_children: bool) -> list[str]:
+            try:
+                xml_text = await self._get_text(url)
+                root = ElementTree.fromstring(xml_text)
+            except Exception:
+                LOGGER.debug("Sitemap indisponible : %s", url, exc_info=True)
+                return []
+
+            values: list[str] = []
+            child_sitemaps: list[str] = []
+
+            for element in root.iter():
+                if not element.tag.lower().endswith("loc") or not element.text:
+                    continue
+
+                location = element.text.strip()
+                if location.lower().endswith(".xml"):
+                    child_sitemaps.append(location)
+                    continue
+
+                normalized = self.normalize_article_url(location)
+                if normalized:
+                    values.append(normalized)
+
+            if allow_children:
+                # Limite le nombre de requêtes en cas de très gros index de sitemaps.
+                relevant_children = [
+                    child
+                    for child in child_sitemaps
+                    if any(word in child.casefold() for word in ("article", "post", "page"))
+                ] or child_sitemaps
+
+                for child in relevant_children[:10]:
+                    values.extend(await parse_sitemap(child, allow_children=False))
+
+            return values
+
+        for sitemap_url in sitemap_candidates:
+            for article_url in await parse_sitemap(sitemap_url, allow_children=True):
+                if article_url not in seen:
+                    seen.add(article_url)
+                    collected.append(article_url)
+
+            if collected:
+                break
+
+        return collected
 
     async def fetch_article(self, url: str) -> CodexArticle:
         html = await self._get_text(url)
