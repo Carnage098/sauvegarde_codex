@@ -374,6 +374,33 @@ class CodexNews(commands.Cog):
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @search.autocomplete("recherche")
+    async def search_query_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        del interaction
+        records = await self.repository.search(current, limit=25)
+        choices: list[app_commands.Choice[str]] = []
+
+        for record in records:
+            category = (
+                record.article.categories[-1]
+                if record.article.categories
+                else "Non classé"
+            )
+            label = f"{record.article.title} • {category}"
+            # La valeur d'un choix Discord est limitée. Le titre suffit pour
+            # relancer une recherche exacte lorsqu'un résultat est sélectionné.
+            choices.append(
+                app_commands.Choice(
+                    name=label[:100],
+                    value=record.article.title[:100],
+                )
+            )
+        return choices
+
     @search.autocomplete("categorie")
     async def category_autocomplete(
         self,
