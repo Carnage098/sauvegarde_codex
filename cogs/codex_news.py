@@ -82,6 +82,17 @@ class CodexNews(commands.Cog):
                 LOGGER.warning("Aucun article Codex YGO trouvé par les différentes méthodes.")
                 return 0
 
+            if self.settings.reseed_on_start:
+                for url in urls:
+                    await self.repository.seed_url(url)
+
+                LOGGER.info(
+                    "%s article(s) resynchronisé(s) sans publication. "
+                    "Remets CODEX_RESEED_ON_START=false après ce déploiement.",
+                    len(urls),
+                )
+                return 0
+
             database_is_empty = await self.repository.is_empty()
 
             if database_is_empty and self.settings.first_run_mode == "seed":
@@ -249,6 +260,11 @@ class CodexNews(commands.Cog):
         embed.add_field(
             name="Premier lancement",
             value=self.settings.first_run_mode,
+            inline=True,
+        )
+        embed.add_field(
+            name="Resynchronisation",
+            value="Active" if self.settings.reseed_on_start else "Inactive",
             inline=True,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
