@@ -35,6 +35,7 @@ class CodexLibraryIndexer:
         scroll_rounds: int,
         max_pages_per_category: int,
         concurrency: int,
+        force_refresh: bool = False,
     ) -> IndexReport:
         urls = await self.client.fetch_archive_article_urls(
             scroll_rounds=scroll_rounds,
@@ -45,7 +46,11 @@ class CodexLibraryIndexer:
 
         library_was_empty = await self.repository.is_empty()
         existing_urls = await self.repository.existing_urls(urls)
-        target_urls = await self.repository.urls_needing_metadata(urls)
+        target_urls = (
+            list(urls)
+            if force_refresh
+            else await self.repository.urls_needing_metadata(urls)
+        )
 
         inserted = 0
         updated = 0
