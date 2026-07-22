@@ -35,6 +35,27 @@ DISCOVERY_ARTICLE_URLS: tuple[str, ...] = (
     "https://codexygo.fr/article/bienvenue-1/",
 )
 
+# Pages utilisées par l'indexeur complet. Les doublons sont éliminés avant
+# l'enregistrement en base.
+ARCHIVE_CATEGORY_URLS: tuple[str, ...] = (
+    "https://codexygo.fr/categorie/actualites/",
+    "https://codexygo.fr/categorie/actualites/ocg-tcg/",
+    "https://codexygo.fr/categorie/actualites/rush-duel/",
+    "https://codexygo.fr/categorie/dossiers/",
+    "https://codexygo.fr/categorie/dossiers/recap/",
+    "https://codexygo.fr/categorie/dossiers/focus/",
+    "https://codexygo.fr/categorie/dossiers/rulings/",
+    "https://codexygo.fr/categorie/codex/",
+)
+
+LOAD_MORE_LABELS: tuple[str, ...] = (
+    "voir plus",
+    "charger plus",
+    "plus d'articles",
+    "articles suivants",
+    "suivant",
+)
+
 CATEGORY_ALIASES: dict[str, str] = {
     "actualite": "Actualités",
     "actualites": "Actualités",
@@ -202,6 +223,209 @@ class CodexClient:
             return urls
         finally:
             await page.close()
+
+    async def _fetch_rendered_archive_page_urls(
+        self,
+        start_url: str,
+        *,
+        scroll_rounds: int,
+        max_pages: int,
+    ) -> list[str]:
+        """Explore une catégorie rendue, son défilement et sa pagination."""
+        browser = await self._ensure_browser()
+        pending_pages: list[str] = [start_url]
+        visited_pages: set[str] = set()
+        article_urls: list[str] = []
+        seen_articles: set[str] = set()
+
+        while pending_pages and len(visited_pages) < max_pages:
+            page_url = pending_pages.pop(0)
+            if page_url in visited_pages:
+                continue
+            visited_pages.add(page_url)
+
+            page = await browser.new_page(
+                locale="fr-FR",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0.0.0 Safari/537.36"
+                ),
+            )
+
+            try:
+                await page.goto(
+                    page_url,
+                    wait_until="domcontentloaded",
+                    timeout=30_000,
+                )
+                try:
+                    await page.wait_for_selector(
+                        'a[href*="/article/"]',
+                        timeout=12_000,
+                    )
+                except PlaywrightTimeoutError:
+                    await page.wait_for_timeout(2_000)
+
+                unchanged_rounds = 0
+                previous_count = -1
+
+                for _ in range(max(1, scroll_rounds)):
+                    hrefs = await page.locator('a[href*="/article/"]').evaluate_all(
+                        "elements => elements.map(element => element.href)"
+                    )
+                    for href in hrefs:
+                        if not isinstance(href, str):
+                            continue
+                        normalized = self.normalize_article_url(href)
+                        if normalized and normalized not in seen_articles:
+                            seen_articles.add(normalized)
+                            article_urls.append(normalized)
+
+                    current_count = len(article_urls)
+                    if current_count == previous_count:
+                        unchanged_rounds += 1
+                    else:
+                        unchanged_rounds = 0
+                    previous_count = current_count
+
+                    clicked = False
+                    for label in LOAD_MORE_LABELS:
+                        locator = page.get_by_text(
+                            re.compile(rf"^{re.escape(label)}$", re.IGNORECASE),
+                            exact=False,
+                        )
+                        try:
+                            if await locator.count() and await locator.first.is_visible():
+                                await locator.first.click(timeout=2_000)
+                                await page.wait_for_timeout(900)
+                                clicked = True
+                                break
+                        except Exception:
+                            continue
+
+                    await page.evaluate(
+                        "window.scrollTo(0, document.body.scrollHeight)"
+                    )
+                    await page.wait_for_timeout(700 if clicked else 500)
+
+                    if unchanged_rounds >= 4 and not clicked:
+                        break
+
+                # Repère aussi une pagination classique (?page=2 ou /page/2/).
+                page_links = await page.locator("a[href]").evaluate_all(
+                    "elements => elements.map(element => ({href: element.href, rel: element.rel || '', text: element.textContent || ''}))"
+                )
+                start_parsed = urlparse(start_url)
+                for link in page_links:
+                    if not isinstance(link, dict):
+                        continue
+                    href = link.get("href")
+                    if not isinstance(href, str):
+                        continue
+                    parsed = urlparse(href)
+                    if (parsed.hostname or "").lower() not in {
+                        "codexygo.fr",
+                        "www.codexygo.fr",
+                    }:
+                        continue
+                    if not parsed.path.startswith(start_parsed.path.rstrip("/")):
+                        continue
+                    rel = str(link.get("rel") or "").casefold()
+                    text = self._fold_text(str(link.get("text") or ""))
+                    is_pagination = (
+                        "next" in rel
+                        or "suivant" in text
+                        or "page=" in parsed.query.casefold()
+                        or re.search(r"/page/\d+/?$", parsed.path) is not None
+                    )
+                    if is_pagination:
+                        normalized_page = urlunparse(
+                            parsed._replace(
+                                scheme="https",
+                                netloc="codexygo.fr",
+                                fragment="",
+                            )
+                        )
+                        if (
+                            normalized_page not in visited_pages
+                            and normalized_page not in pending_pages
+                        ):
+                            pending_pages.append(normalized_page)
+            except Exception:
+                LOGGER.debug(
+                    "Impossible d'explorer la page d'archive %s",
+                    page_url,
+                    exc_info=True,
+                )
+            finally:
+                await page.close()
+
+        LOGGER.info(
+            "%s article(s) découvert(s) sur %s (%s page(s) explorée(s)).",
+            len(article_urls),
+            start_url,
+            len(visited_pages),
+        )
+        return article_urls
+
+    async def fetch_archive_article_urls(
+        self,
+        *,
+        scroll_rounds: int = 35,
+        max_pages_per_category: int = 20,
+    ) -> list[str]:
+        """Découvre les archives via sitemap, catégories, pagination et scroll."""
+        collected: list[str] = []
+        seen: set[str] = set()
+
+        try:
+            sitemap_urls = await self._fetch_sitemap_article_urls()
+        except Exception:
+            LOGGER.debug("Lecture des sitemaps impossible.", exc_info=True)
+            sitemap_urls = []
+
+        for url in sitemap_urls:
+            if url not in seen:
+                seen.add(url)
+                collected.append(url)
+
+        for category_url in ARCHIVE_CATEGORY_URLS:
+            try:
+                urls = await self._fetch_rendered_archive_page_urls(
+                    category_url,
+                    scroll_rounds=scroll_rounds,
+                    max_pages=max_pages_per_category,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Échec de l'exploration de la catégorie %s",
+                    category_url,
+                )
+                continue
+
+            for url in urls:
+                if url not in seen:
+                    seen.add(url)
+                    collected.append(url)
+
+        # L'accueil garantit que les toutes dernières publications sont incluses.
+        try:
+            homepage_urls = await self.fetch_homepage_article_urls()
+        except Exception:
+            LOGGER.debug("Lecture finale de l'accueil impossible.", exc_info=True)
+            homepage_urls = []
+
+        for url in homepage_urls:
+            if url not in seen:
+                seen.add(url)
+                collected.append(url)
+
+        LOGGER.info(
+            "Indexation Codex : %s URL(s) d'article unique(s) découvertes.",
+            len(collected),
+        )
+        return collected
 
     @staticmethod
     def normalize_article_url(href: str) -> str | None:
