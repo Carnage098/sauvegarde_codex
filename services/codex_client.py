@@ -22,6 +22,13 @@ CODEX_BASE_URL = "https://codexygo.fr/"
 ARTICLE_PATH_PREFIX = "/article/"
 CATEGORY_PATH_MARKER = "/categorie/"
 
+# Page d'article stable utilisée uniquement comme source de découverte de secours.
+# Les pages d'articles Codex affichent une section « Articles récents » rendue
+# côté serveur, même lorsque l'accueil est chargé dynamiquement.
+DISCOVERY_ARTICLE_URLS: tuple[str, ...] = (
+    "https://codexygo.fr/article/bienvenue-1/",
+)
+
 CATEGORY_ALIASES: dict[str, str] = {
     "actualite": "Actualités",
     "actualites": "Actualités",
@@ -209,6 +216,18 @@ class CodexClient:
             )
             return combined
 
+        # Dernier secours avant les sitemaps : une page d'article permanente.
+        # Codex YGO affiche une section « Articles récents » sur les pages
+        # d'articles, ce qui permet d'obtenir les nouveaux liens même si
+        # l'accueil et les catégories sont hydratés en JavaScript.
+        discovery_urls = await self._fetch_discovery_article_urls()
+        if discovery_urls:
+            LOGGER.info(
+                "%s lien(s) d'article trouvé(s) via une page d'article de secours.",
+                len(discovery_urls),
+            )
+            return discovery_urls
+
         sitemap_urls = await self._fetch_sitemap_article_urls()
         if sitemap_urls:
             LOGGER.info(
@@ -218,6 +237,110 @@ class CodexClient:
             return sitemap_urls
 
         return []
+
+    async def _fetch_discovery_article_urls(self) -> list[str]:
+        collected: list[str] = []
+        seen: set[str] = set()
+
+        for discovery_url in DISCOVERY_ARTICLE_URLS:
+            try:
+                raw_html = await self._get_text(discovery_url)
+            except Exception:
+                LOGGER.debug(
+                    "Impossible de lire la page de découverte %s",
+                    discovery_url,
+                    exc_info=True,
+                )
+                continue
+
+            urls = self._extract_recent_article_urls_from_html(raw_html)
+            if not urls:
+                # Le HTML du site peut changer : on garde l'extracteur général
+                # comme solution de repli.
+                urls = self._extract_article_urls_from_html(raw_html)
+
+            normalized_discovery = self.normalize_article_url(discovery_url)
+            for url in urls:
+                if url == normalized_discovery or url in seen:
+                    continue
+                seen.add(url)
+                collected.append(url)
+
+            if collected:
+                break
+
+        return collected
+
+    @classmethod
+    def _extract_recent_article_urls_from_html(cls, raw_html: str) -> list[str]:
+        """Extrait en priorité les liens de la section « Articles récents »."""
+        decoded_html = html_lib.unescape(raw_html)
+        decoded_html = (
+            decoded_html
+            .replace(r"\u002F", "/")
+            .replace(r"\u002f", "/")
+            .replace(r"\u003A", ":")
+            .replace(r"\u003a", ":")
+        )
+        decoded_html = re.sub(r"\\+/", "/", decoded_html)
+        soup = BeautifulSoup(decoded_html, "html.parser")
+
+        def folded(value: str) -> str:
+            normalized = unicodedata.normalize("NFKD", value)
+            return "".join(
+                char for char in normalized if not unicodedata.combining(char)
+            ).casefold()
+
+        heading: Tag | None = None
+        for element in soup.find_all(["h2", "h3", "h4", "h5", "strong", "div"]):
+            if not isinstance(element, Tag):
+                continue
+            text = re.sub(r"\s+", " ", element.get_text(" ", strip=True))
+            if text and "articles recents" in folded(text) and len(text) <= 80:
+                heading = element
+                break
+
+        candidates: list[str] = []
+
+        if heading is not None:
+            # Cherche le plus petit parent contenant plusieurs liens d'articles.
+            for parent in [heading, *list(heading.parents)[:6]]:
+                if not isinstance(parent, Tag):
+                    continue
+                hrefs = [
+                    anchor.get("href")
+                    for anchor in parent.find_all("a", href=True)
+                    if isinstance(anchor.get("href"), str)
+                    and "/article/" in str(anchor.get("href"))
+                ]
+                if len(hrefs) >= 2:
+                    candidates.extend(str(href) for href in hrefs)
+                    break
+
+            # Certains thèmes placent les cartes dans les frères qui suivent le titre.
+            if not candidates:
+                sibling = heading.find_next_sibling()
+                scanned = 0
+                while isinstance(sibling, Tag) and scanned < 8:
+                    for anchor in sibling.find_all("a", href=True):
+                        href = anchor.get("href")
+                        if isinstance(href, str) and "/article/" in href:
+                            candidates.append(href)
+                    sibling = sibling.find_next_sibling()
+                    scanned += 1
+
+        if not candidates:
+            return []
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = cls.normalize_article_url(candidate)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                urls.append(normalized)
+
+        return urls
 
     @classmethod
     def _extract_article_urls_from_html(cls, raw_html: str) -> list[str]:
