@@ -181,7 +181,11 @@ class CodexNews(commands.Cog):
 
             return sent_count
 
-    async def sync_library(self) -> IndexReport:
+    async def sync_library(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> IndexReport:
         async with self.index_lock:
             return await self.indexer.sync(
                 scroll_rounds=self.settings.archive_scroll_rounds,
@@ -189,6 +193,7 @@ class CodexNews(commands.Cog):
                     self.settings.archive_max_pages_per_category
                 ),
                 concurrency=self.settings.archive_concurrency,
+                force_refresh=force_refresh,
             )
 
     @tasks.loop(minutes=10, reconnect=True)
@@ -422,7 +427,10 @@ class CodexNews(commands.Cog):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            report = await self.sync_library()
+            # La commande manuelle force la relecture des métadonnées des
+            # articles déjà présents. Cela reconstruit les catégories et
+            # l'index de recherche après une migration depuis l'ancienne base.
+            report = await self.sync_library(force_refresh=True)
             total = await self.repository.count()
             await interaction.followup.send(
                 "✅ **Indexation terminée**\n"
