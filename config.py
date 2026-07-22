@@ -57,6 +57,11 @@ class Settings:
     first_run_mode: str
     reseed_on_start: bool
     database_path: Path
+    archive_auto_sync: bool
+    archive_sync_hours: int
+    archive_scroll_rounds: int
+    archive_concurrency: int
+    archive_max_pages_per_category: int
     log_level: str
 
     @classmethod
@@ -94,5 +99,30 @@ class Settings:
             first_run_mode=first_run_mode,
             reseed_on_start=_bool_env("CODEX_RESEED_ON_START", False),
             database_path=Path(database_raw),
+            archive_auto_sync=_bool_env("CODEX_ARCHIVE_AUTO_SYNC", True),
+            archive_sync_hours=_positive_int(
+                "CODEX_ARCHIVE_SYNC_HOURS",
+                default=24,
+                minimum=1,
+                maximum=168,
+            ),
+            archive_scroll_rounds=_positive_int(
+                "CODEX_ARCHIVE_SCROLL_ROUNDS",
+                default=35,
+                minimum=5,
+                maximum=100,
+            ),
+            archive_concurrency=_positive_int(
+                "CODEX_ARCHIVE_CONCURRENCY",
+                default=3,
+                minimum=1,
+                maximum=6,
+            ),
+            archive_max_pages_per_category=_positive_int(
+                "CODEX_ARCHIVE_MAX_PAGES_PER_CATEGORY",
+                default=20,
+                minimum=1,
+                maximum=100,
+            ),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         )
