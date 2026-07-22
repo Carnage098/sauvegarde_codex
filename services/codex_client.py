@@ -91,6 +91,9 @@ class CodexClient:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._browser_lock = asyncio.Lock()
+        # Catégories déduites des pages d'archives pendant une indexation.
+        # Elles servent de secours lorsque la page d'article ne les expose pas.
+        self._category_hints: dict[str, tuple[str, ...]] = {}
 
     async def open(self) -> None:
         if self._session and not self._session.closed:
@@ -221,6 +224,39 @@ class CodexClient:
                 )
 
             return urls
+        finally:
+            await page.close()
+
+    async def _fetch_rendered_article_html(self, url: str) -> str:
+        """Charge une page d'article avec Chromium pour obtenir les catégories.
+
+        Codex YGO injecte certaines informations de taxonomie après le chargement
+        JavaScript. Le HTML brut contient souvent le titre, mais pas le fil
+        d'Ariane ni les liens de catégories.
+        """
+        browser = await self._ensure_browser()
+        page = await browser.new_page(
+            locale="fr-FR",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+        )
+
+        try:
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+            try:
+                await page.wait_for_selector("h1", timeout=12_000)
+            except PlaywrightTimeoutError:
+                pass
+            # Laisse le temps au fil d'Ariane et aux taxonomies de s'afficher.
+            await page.wait_for_timeout(1_200)
+            return await page.content()
         finally:
             await page.close()
 
@@ -378,6 +414,7 @@ class CodexClient:
         """Découvre les archives via sitemap, catégories, pagination et scroll."""
         collected: list[str] = []
         seen: set[str] = set()
+        self._category_hints = {}
 
         try:
             sitemap_urls = await self._fetch_sitemap_article_urls()
@@ -404,7 +441,12 @@ class CodexClient:
                 )
                 continue
 
+            category_hint = self._categories_from_category_url(category_url)
             for url in urls:
+                existing_hint = self._category_hints.get(url, ())
+                if len(category_hint) > len(existing_hint):
+                    self._category_hints[url] = category_hint
+
                 if url not in seen:
                     seen.add(url)
                     collected.append(url)
@@ -766,8 +808,64 @@ class CodexClient:
         return collected
 
     async def fetch_article(self, url: str) -> CodexArticle:
-        html = await self._get_text(url)
-        return self.parse_article_html(url, html)
+        raw_html = await self._get_text(url)
+        parsed_article = self.parse_article_html(url, raw_html)
+        hinted_categories = (
+            parsed_article.categories
+            or self._category_hints.get(url, ())
+        )
+        raw_article = CodexArticle(
+            title=parsed_article.title,
+            url=parsed_article.url,
+            description=parsed_article.description,
+            image_url=parsed_article.image_url,
+            author=parsed_article.author,
+            categories=hinted_categories,
+            published_at=parsed_article.published_at,
+            is_premium=parsed_article.is_premium,
+        )
+
+        needs_rendered_metadata = (
+            not raw_article.categories
+            or raw_article.title == "Nouvel article Codex YGO"
+            or not raw_article.description
+        )
+        if not needs_rendered_metadata:
+            return raw_article
+
+        try:
+            rendered_html = await self._fetch_rendered_article_html(url)
+            rendered_article = self.parse_article_html(url, rendered_html)
+        except Exception:
+            LOGGER.debug(
+                "Impossible d'enrichir l'article avec le rendu JavaScript : %s",
+                url,
+                exc_info=True,
+            )
+            return raw_article
+
+        return CodexArticle(
+            title=(
+                rendered_article.title
+                if rendered_article.title != "Nouvel article Codex YGO"
+                else raw_article.title
+            ),
+            url=url,
+            description=rendered_article.description or raw_article.description,
+            image_url=rendered_article.image_url or raw_article.image_url,
+            author=rendered_article.author or raw_article.author,
+            categories=(
+                rendered_article.categories
+                or raw_article.categories
+                or self._category_hints.get(url, ())
+            ),
+            published_at=(
+                rendered_article.published_at or raw_article.published_at
+            ),
+            is_premium=(
+                rendered_article.is_premium or raw_article.is_premium
+            ),
+        )
 
     async def fetch_articles(
         self,
