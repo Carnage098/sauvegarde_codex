@@ -16,6 +16,7 @@ from services.codex_client import CodexClient
 from services.embed_factory import CodexEmbedFactory
 from services.library_indexer import CodexLibraryIndexer
 from views.article_view import ArticleLinkView
+from views.search_results_view import SearchResultsView
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +36,10 @@ class CodexNews(commands.Cog):
         self.check_lock = asyncio.Lock()
         self.index_lock = asyncio.Lock()
         self._reseed_completed = False
+        self.last_article_check_at: datetime | None = None
+        self.last_article_check_error: str | None = None
+        self.last_archive_sync_at: datetime | None = None
+        self.last_archive_sync_error: str | None = None
 
         self.article_check_loop.change_interval(
             minutes=self.settings.check_interval_minutes
@@ -83,9 +88,10 @@ class CodexNews(commands.Cog):
         if self.settings.codex_ping_role_id:
             content = f"<@&{self.settings.codex_ping_role_id}>"
 
-        return await channel.send(
+        batches = CodexEmbedFactory.build_batches(article)
+        first_message = await channel.send(
             content=content,
-            embed=CodexEmbedFactory.build(article),
+            embeds=batches[0],
             view=ArticleLinkView(article),
             allowed_mentions=discord.AllowedMentions(
                 roles=True,
@@ -94,6 +100,33 @@ class CodexNews(commands.Cog):
                 replied_user=False,
             ),
         )
+        for batch in batches[1:]:
+            await channel.send(embeds=batch)
+            await asyncio.sleep(0.5)
+        return first_message
+
+    async def _send_interaction_article(
+        self,
+        interaction: discord.Interaction,
+        article: CodexArticle,
+        *,
+        ephemeral: bool,
+    ) -> None:
+        """Envoie un article complet, même s'il dépasse 10 embeds."""
+        batches = CodexEmbedFactory.build_batches(article)
+        first_kwargs = {
+            "embeds": batches[0],
+            "view": ArticleLinkView(article),
+            "ephemeral": ephemeral,
+        }
+        if interaction.response.is_done():
+            await interaction.followup.send(**first_kwargs)
+        else:
+            await interaction.response.send_message(**first_kwargs)
+
+        for batch in batches[1:]:
+            await interaction.followup.send(embeds=batch, ephemeral=ephemeral)
+            await asyncio.sleep(0.5)
 
     async def _upsert_homepage_articles(
         self,
@@ -200,9 +233,13 @@ class CodexNews(commands.Cog):
     async def article_check_loop(self) -> None:
         try:
             sent_count = await self.check_for_new_articles()
+            self.last_article_check_at = datetime.now(timezone.utc)
+            self.last_article_check_error = None
             if sent_count:
                 LOGGER.info("%s nouvel/nouveaux article(s) publié(s).", sent_count)
-        except Exception:
+        except Exception as exc:
+            self.last_article_check_at = datetime.now(timezone.utc)
+            self.last_article_check_error = type(exc).__name__
             LOGGER.exception("Erreur pendant la vérification automatique Codex YGO.")
 
     @article_check_loop.before_loop
@@ -213,6 +250,8 @@ class CodexNews(commands.Cog):
     async def archive_sync_loop(self) -> None:
         try:
             report = await self.sync_library()
+            self.last_archive_sync_at = datetime.now(timezone.utc)
+            self.last_archive_sync_error = None
             LOGGER.info(
                 "Synchronisation automatique de la bibliothèque terminée : "
                 "%s article(s) connus.",
@@ -223,7 +262,9 @@ class CodexNews(commands.Cog):
                     "%s article(s) n'ont pas pu être lus pendant l'indexation.",
                     report.failed_articles,
                 )
-        except Exception:
+        except Exception as exc:
+            self.last_archive_sync_at = datetime.now(timezone.utc)
+            self.last_archive_sync_error = type(exc).__name__
             LOGGER.exception("Échec de la synchronisation des archives Codex YGO.")
 
     @archive_sync_loop.before_loop
@@ -231,6 +272,53 @@ class CodexNews(commands.Cog):
         await self.bot.wait_until_ready()
         # Laisse la vérification légère des nouveautés passer en premier.
         await asyncio.sleep(45)
+
+    @staticmethod
+    def _diagnostic_value(
+        attempted_at: datetime | None,
+        error: str | None,
+    ) -> str:
+        if attempted_at is None:
+            return "Pas encore exécutée depuis le démarrage"
+        state = f"⚠️ Échec ({error})" if error else "✅ Réussie"
+        return f"{state}\n{discord.utils.format_dt(attempted_at, 'R')}"
+
+    @codex.command(
+        name="aide",
+        description="Explique simplement toutes les commandes Codex disponibles.",
+    )
+    async def help(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="📘 Aide du bot Sauvegarde Codex",
+            description=(
+                "Le bot surveille **Codex YGO**, annonce les nouveaux articles "
+                "et conserve une bibliothèque consultable."
+            ),
+            colour=discord.Colour.blurple(),
+        )
+        embed.add_field(
+            name="👤 Pour tous les membres",
+            value=(
+                "`/codex latest` — dernier article publié\n"
+                "`/codex recents` — articles récents enregistrés\n"
+                "`/codex search` — recherche par mots-clés ou catégorie\n"
+                "`/codex article` — publie un article précis dans le salon\n"
+                "`/codex categories` — liste les catégories disponibles"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="🛠️ Pour le staff",
+            value=(
+                "`/codex check` — vérification immédiate des nouveautés\n"
+                "`/codex index` — reconstruction complète de la bibliothèque\n"
+                "`/codex preview` — aperçu d'un lien Codex\n"
+                "`/codex status` — état détaillé du module"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Les commandes du staff nécessitent Gérer le serveur.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @codex.command(name="latest", description="Affiche le dernier article de Codex YGO.")
     async def latest(self, interaction: discord.Interaction) -> None:
@@ -250,9 +338,9 @@ class CodexNews(commands.Cog):
                 article,
                 announced=None if existing else True,
             )
-            await interaction.followup.send(
-                embed=CodexEmbedFactory.build(article),
-                view=ArticleLinkView(article),
+            await self._send_interaction_article(
+                interaction,
+                article,
                 ephemeral=True,
             )
         except Exception:
@@ -261,6 +349,31 @@ class CodexNews(commands.Cog):
                 "Impossible de récupérer le dernier article pour le moment.",
                 ephemeral=True,
             )
+
+    @codex.command(
+        name="recents",
+        description="Affiche les articles récemment enregistrés.",
+    )
+    async def recents(self, interaction: discord.Interaction) -> None:
+        records = await self.repository.recent_records(limit=25)
+        if not records:
+            await interaction.response.send_message(
+                "La bibliothèque est encore vide.",
+                ephemeral=True,
+            )
+            return
+
+        view = SearchResultsView(
+            requester_id=interaction.user.id,
+            records=records,
+            title="🕘 Articles Codex récents",
+            empty_footer="Utilise /codex article pour en partager un",
+        )
+        await interaction.response.send_message(
+            embed=view.build_embed(),
+            view=view,
+            ephemeral=True,
+        )
 
     @codex.command(
         name="article",
@@ -291,9 +404,10 @@ class CodexNews(commands.Cog):
             )
             return
 
-        await interaction.response.send_message(
-            embed=CodexEmbedFactory.build(record.article),
-            view=ArticleLinkView(record.article),
+        await self._send_interaction_article(
+            interaction,
+            record.article,
+            ephemeral=False,
         )
 
     @article.autocomplete("article")
@@ -339,7 +453,7 @@ class CodexNews(commands.Cog):
         records = await self.repository.search(
             recherche,
             category=categorie,
-            limit=10,
+            limit=50,
         )
 
         if not records:
@@ -349,30 +463,18 @@ class CodexNews(commands.Cog):
             )
             return
 
-        lines: list[str] = []
-        for index, record in enumerate(records, start=1):
-            published_at = record.article.published_at
-            if published_at and published_at.tzinfo is None:
-                published_at = published_at.replace(tzinfo=timezone.utc)
-            date_text = (
-                discord.utils.format_dt(published_at, "d")
-                if published_at
-                else "date inconnue"
-            )
-            lines.append(
-                f"**{index}. [{record.article.title}]({record.article.url})**\n"
-                f"`#{record.id}` • {record.article.category_path} • {date_text}"
-            )
-
-        embed = discord.Embed(
-            title=f"🔎 Résultats pour « {recherche[:80]} »",
-            description="\n\n".join(lines)[:4_096],
-            colour=discord.Colour.blurple(),
+        category_text = f" • {categorie}" if categorie else ""
+        view = SearchResultsView(
+            requester_id=interaction.user.id,
+            records=records,
+            title=f"🔎 Résultats pour « {recherche[:80]} »{category_text}",
+            empty_footer="Utilise /codex article pour en partager un",
         )
-        embed.set_footer(
-            text="Utilise /codex article et sélectionne le titre pour l'envoyer."
+        await interaction.followup.send(
+            embed=view.build_embed(),
+            view=view,
+            ephemeral=True,
         )
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @search.autocomplete("recherche")
     async def search_query_autocomplete(
@@ -458,6 +560,8 @@ class CodexNews(commands.Cog):
             # articles déjà présents. Cela reconstruit les catégories et
             # l'index de recherche après une migration depuis l'ancienne base.
             report = await self.sync_library(force_refresh=True)
+            self.last_archive_sync_at = datetime.now(timezone.utc)
+            self.last_archive_sync_error = None
             total = await self.repository.count()
             await interaction.followup.send(
                 "✅ **Indexation terminée**\n"
@@ -468,7 +572,9 @@ class CodexNews(commands.Cog):
                 f"• Total dans la bibliothèque : **{total}**",
                 ephemeral=True,
             )
-        except Exception:
+        except Exception as exc:
+            self.last_archive_sync_at = datetime.now(timezone.utc)
+            self.last_archive_sync_error = type(exc).__name__
             LOGGER.exception("Échec de /codex index")
             await interaction.followup.send(
                 "L'indexation a échoué. Consulte les logs Railway.",
@@ -482,6 +588,8 @@ class CodexNews(commands.Cog):
 
         try:
             count = await self.check_for_new_articles()
+            self.last_article_check_at = datetime.now(timezone.utc)
+            self.last_article_check_error = None
             if count == 0:
                 text = "Aucun nouvel article n'a été détecté."
             elif count == 1:
@@ -489,7 +597,9 @@ class CodexNews(commands.Cog):
             else:
                 text = f"{count} nouveaux articles ont été publiés."
             await interaction.followup.send(text, ephemeral=True)
-        except Exception:
+        except Exception as exc:
+            self.last_article_check_at = datetime.now(timezone.utc)
+            self.last_article_check_error = type(exc).__name__
             LOGGER.exception("Échec de /codex check")
             await interaction.followup.send(
                 "La vérification a échoué. Consulte les logs du bot.",
@@ -517,9 +627,9 @@ class CodexNews(commands.Cog):
                 article,
                 announced=None if existing else True,
             )
-            await interaction.followup.send(
-                embed=CodexEmbedFactory.build(article),
-                view=ArticleLinkView(article),
+            await self._send_interaction_article(
+                interaction,
+                article,
                 ephemeral=True,
             )
         except Exception:
@@ -572,11 +682,27 @@ class CodexNews(commands.Cog):
             inline=True,
         )
         embed.add_field(
+            name="Dernière vérification",
+            value=self._diagnostic_value(
+                self.last_article_check_at,
+                self.last_article_check_error,
+            ),
+            inline=True,
+        )
+        embed.add_field(
             name="Indexation automatique",
             value=(
                 f"Toutes les {self.settings.archive_sync_hours} h"
                 if self.archive_sync_loop.is_running()
                 else "Désactivée"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Dernière indexation",
+            value=self._diagnostic_value(
+                self.last_archive_sync_at,
+                self.last_archive_sync_error,
             ),
             inline=True,
         )

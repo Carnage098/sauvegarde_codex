@@ -109,6 +109,41 @@ class CodexParserTests(unittest.TestCase):
             ],
         )
 
+    def test_content_images_exclude_cover_and_interface_assets(self) -> None:
+        html = """
+        <html>
+          <head>
+            <meta property="og:title" content="Nouvelles cartes">
+            <meta property="og:image" content="/images/couverture.webp">
+          </head>
+          <body>
+            <header><img src="/images/logo-codex.png" width="400"></header>
+            <main>
+              <article>
+                <img src="/images/couverture.webp" width="1200" height="630">
+                <img data-src="/images/carte-1.png.webp" width="1920" height="1080">
+                <img src="/images/icon-share.png" width="32" height="32">
+                <img srcset="/images/carte-2-small.webp 400w,
+                             /images/carte-2.webp 1200w" alt="Illustration étendue">
+              </article>
+            </main>
+          </body>
+        </html>
+        """
+
+        article = CodexClient.parse_article_html(
+            "https://codexygo.fr/article/nouvelles-cartes/",
+            html,
+        )
+
+        self.assertEqual(
+            article.content_image_urls,
+            (
+                "https://codexygo.fr/images/carte-1.png.webp",
+                "https://codexygo.fr/images/carte-2.webp",
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

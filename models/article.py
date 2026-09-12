@@ -14,6 +14,7 @@ class CodexArticle:
     categories: tuple[str, ...] = ()
     published_at: datetime | None = None
     is_premium: bool = False
+    content_image_urls: tuple[str, ...] = ()
 
     @property
     def category_path(self) -> str:

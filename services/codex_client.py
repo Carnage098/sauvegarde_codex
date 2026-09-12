@@ -84,6 +84,17 @@ CATEGORY_SLUGS: dict[str, str] = {
     "codex": "Codex",
 }
 
+NON_CONTENT_IMAGE_MARKERS: tuple[str, ...] = (
+    "avatar",
+    "favicon",
+    "emoji",
+    "logo",
+    "placeholder",
+    "spinner",
+    "loading",
+    "social-icon",
+)
+
 
 class CodexClient:
     def __init__(self) -> None:
@@ -823,12 +834,14 @@ class CodexClient:
             categories=hinted_categories,
             published_at=parsed_article.published_at,
             is_premium=parsed_article.is_premium,
+            content_image_urls=parsed_article.content_image_urls,
         )
 
         needs_rendered_metadata = (
             not raw_article.categories
             or raw_article.title == "Nouvel article Codex YGO"
             or not raw_article.description
+            or not raw_article.content_image_urls
         )
         if not needs_rendered_metadata:
             return raw_article
@@ -865,6 +878,12 @@ class CodexClient:
             is_premium=(
                 rendered_article.is_premium or raw_article.is_premium
             ),
+            content_image_urls=tuple(
+                dict.fromkeys(
+                    rendered_article.content_image_urls
+                    + raw_article.content_image_urls
+                )
+            )[:9],
         )
 
     async def fetch_articles(
@@ -946,6 +965,11 @@ class CodexClient:
         categories = cls._extract_categories(soup)
         published_at = cls._extract_published_at(soup)
         is_premium = cls._detect_premium(soup)
+        content_image_urls = cls._extract_content_image_urls(
+            soup,
+            page_url=url,
+            cover_url=image_url,
+        )
 
         return CodexArticle(
             title=title,
@@ -956,7 +980,102 @@ class CodexClient:
             categories=categories,
             published_at=published_at,
             is_premium=is_premium,
+            content_image_urls=content_image_urls,
         )
+
+    @classmethod
+    def _extract_content_image_urls(
+        cls,
+        soup: BeautifulSoup,
+        *,
+        page_url: str,
+        cover_url: str | None,
+    ) -> tuple[str, ...]:
+        """Extrait les grands visuels du corps de l'article.
+
+        Les logos, avatars, icônes et images de navigation sont ignorés. Les
+        URLs restent distantes : Discord les affiche directement dans les
+        embeds sans que le bot ait à télécharger les fichiers.
+        """
+
+        containers = list(soup.find_all("article"))
+        if not containers:
+            containers = list(soup.find_all("main"))
+        if not containers and soup.body is not None:
+            containers = [soup.body]
+
+        excluded_urls = {cover_url} if cover_url else set()
+        collected: list[str] = []
+        seen: set[str] = set()
+
+        for container in containers:
+            for element in container.find_all("img"):
+                if not isinstance(element, Tag):
+                    continue
+                if element.find_parent(["nav", "header", "footer", "aside"]):
+                    continue
+
+                source = cls._best_image_source(element)
+                if not source or source.startswith("data:"):
+                    continue
+
+                absolute_url = urljoin(page_url, source)
+                parsed = urlparse(absolute_url)
+                if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                    continue
+
+                marker_text = " ".join(
+                    (
+                        absolute_url,
+                        str(element.get("alt") or ""),
+                        " ".join(element.get("class") or ()),
+                    )
+                ).casefold()
+                if any(marker in marker_text for marker in NON_CONTENT_IMAGE_MARKERS):
+                    continue
+
+                width = cls._positive_dimension(element.get("width"))
+                height = cls._positive_dimension(element.get("height"))
+                if width is not None and width < 120:
+                    continue
+                if height is not None and height < 120:
+                    continue
+
+                normalized = urlunparse(parsed._replace(fragment=""))
+                if normalized in excluded_urls or normalized in seen:
+                    continue
+
+                seen.add(normalized)
+                collected.append(normalized)
+
+        return tuple(collected)
+
+    @staticmethod
+    def _best_image_source(element: Tag) -> str | None:
+        for attribute in ("data-src", "data-lazy-src", "data-original"):
+            value = element.get(attribute)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        srcset = element.get("srcset") or element.get("data-srcset")
+        if isinstance(srcset, str) and srcset.strip():
+            candidates = [
+                part.strip().split()[0]
+                for part in srcset.split(",")
+                if part.strip()
+            ]
+            if candidates:
+                return candidates[-1]
+
+        source = element.get("src")
+        return source.strip() if isinstance(source, str) and source.strip() else None
+
+    @staticmethod
+    def _positive_dimension(value: object) -> int | None:
+        if value is None:
+            return None
+        match = re.search(r"\d+", str(value))
+        return int(match.group(0)) if match else None
 
     @staticmethod
     def _meta_content(
