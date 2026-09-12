@@ -62,7 +62,6 @@ class Settings:
     archive_scroll_rounds: int
     archive_concurrency: int
     archive_max_pages_per_category: int
-    max_images_per_article: int
     log_level: str
 
     @classmethod
@@ -124,12 +123,6 @@ class Settings:
                 default=20,
                 minimum=1,
                 maximum=100,
-            ),
-            max_images_per_article=_positive_int(
-                "CODEX_MAX_IMAGES_PER_ARTICLE",
-                default=4,
-                minimum=0,
-                maximum=9,
             ),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         )

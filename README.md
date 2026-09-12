@@ -10,7 +10,7 @@ depuis Discord.
 - stockage persistant dans SQLite et anti-doublon ;
 - récupération du titre, de la description, de l'image, de l'auteur, de la date,
   des catégories et du statut Premium ;
-- galerie des grands visuels intégrés dans le corps de l'article ;
+- galerie de tous les grands visuels intégrés dans le corps de l'article ;
 - indexation périodique des archives sans republier les anciens articles ;
 - recherche tolérante aux accents, fautes de frappe et mots dans le désordre ;
 - résultats paginés et raccourci vers les articles récents ;
@@ -68,9 +68,12 @@ CODEX_CHANNEL_ID=identifiant_du_salon
 Les autres réglages et leurs valeurs recommandées figurent dans
 [`.env.example`](.env.example).
 
-`CODEX_MAX_IMAGES_PER_ARTICLE` contrôle le nombre de visuels internes ajoutés
-après l'image principale. La valeur recommandée est `4` ; mets `0` pour
-désactiver la galerie ou jusqu'à `9` pour en afficher davantage.
+Tous les visuels pertinents du corps de l'article sont envoyés. Lorsqu'un
+article contient plus d'images que Discord ne l'autorise dans un seul message,
+le bot répartit automatiquement la galerie sur plusieurs messages.
+
+Après le premier déploiement de cette fonctionnalité, lance une fois
+`/codex index` afin de récupérer aussi les images des articles déjà enregistrés.
 
 Pour obtenir l'identifiant d'un salon, active le mode développeur de Discord,
 puis fais un clic droit sur le salon et sélectionne **Copier l'identifiant**.

@@ -28,6 +28,7 @@ CATEGORY_STYLES: dict[str, EmbedStyle] = {
 }
 
 DEFAULT_STYLE = EmbedStyle("Article Codex YGO", "✨", 0x5865F2)
+DISCORD_MAX_EMBEDS_PER_MESSAGE = 10
 STYLE_PRIORITY = (
     "Rulings",
     "Focus",
@@ -95,12 +96,10 @@ class CodexEmbedFactory:
     def build_all(
         cls,
         article: CodexArticle,
-        *,
-        max_content_images: int = 4,
     ) -> list[discord.Embed]:
         """Construit l'embed principal puis une galerie de visuels internes."""
         embeds = [cls.build(article)]
-        image_urls = article.content_image_urls[: max(0, max_content_images)]
+        image_urls = article.content_image_urls
         if not image_urls:
             return embeds
 
@@ -118,3 +117,12 @@ class CodexEmbedFactory:
             embeds.append(image_embed)
 
         return embeds
+
+    @classmethod
+    def build_batches(cls, article: CodexArticle) -> list[list[discord.Embed]]:
+        """Répartit tous les visuels selon la limite de 10 embeds de Discord."""
+        embeds = cls.build_all(article)
+        return [
+            embeds[start : start + DISCORD_MAX_EMBEDS_PER_MESSAGE]
+            for start in range(0, len(embeds), DISCORD_MAX_EMBEDS_PER_MESSAGE)
+        ]

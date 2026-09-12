@@ -1047,8 +1047,6 @@ class CodexClient:
 
                 seen.add(normalized)
                 collected.append(normalized)
-                if len(collected) >= 9:
-                    return tuple(collected)
 
         return tuple(collected)
 

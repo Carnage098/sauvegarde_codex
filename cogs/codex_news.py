@@ -88,12 +88,10 @@ class CodexNews(commands.Cog):
         if self.settings.codex_ping_role_id:
             content = f"<@&{self.settings.codex_ping_role_id}>"
 
-        return await channel.send(
+        batches = CodexEmbedFactory.build_batches(article)
+        first_message = await channel.send(
             content=content,
-            embeds=CodexEmbedFactory.build_all(
-                article,
-                max_content_images=self.settings.max_images_per_article,
-            ),
+            embeds=batches[0],
             view=ArticleLinkView(article),
             allowed_mentions=discord.AllowedMentions(
                 roles=True,
@@ -102,6 +100,33 @@ class CodexNews(commands.Cog):
                 replied_user=False,
             ),
         )
+        for batch in batches[1:]:
+            await channel.send(embeds=batch)
+            await asyncio.sleep(0.5)
+        return first_message
+
+    async def _send_interaction_article(
+        self,
+        interaction: discord.Interaction,
+        article: CodexArticle,
+        *,
+        ephemeral: bool,
+    ) -> None:
+        """Envoie un article complet, même s'il dépasse 10 embeds."""
+        batches = CodexEmbedFactory.build_batches(article)
+        first_kwargs = {
+            "embeds": batches[0],
+            "view": ArticleLinkView(article),
+            "ephemeral": ephemeral,
+        }
+        if interaction.response.is_done():
+            await interaction.followup.send(**first_kwargs)
+        else:
+            await interaction.response.send_message(**first_kwargs)
+
+        for batch in batches[1:]:
+            await interaction.followup.send(embeds=batch, ephemeral=ephemeral)
+            await asyncio.sleep(0.5)
 
     async def _upsert_homepage_articles(
         self,
@@ -313,12 +338,9 @@ class CodexNews(commands.Cog):
                 article,
                 announced=None if existing else True,
             )
-            await interaction.followup.send(
-                embeds=CodexEmbedFactory.build_all(
-                    article,
-                    max_content_images=self.settings.max_images_per_article,
-                ),
-                view=ArticleLinkView(article),
+            await self._send_interaction_article(
+                interaction,
+                article,
                 ephemeral=True,
             )
         except Exception:
@@ -382,12 +404,10 @@ class CodexNews(commands.Cog):
             )
             return
 
-        await interaction.response.send_message(
-            embeds=CodexEmbedFactory.build_all(
-                record.article,
-                max_content_images=self.settings.max_images_per_article,
-            ),
-            view=ArticleLinkView(record.article),
+        await self._send_interaction_article(
+            interaction,
+            record.article,
+            ephemeral=False,
         )
 
     @article.autocomplete("article")
@@ -607,12 +627,9 @@ class CodexNews(commands.Cog):
                 article,
                 announced=None if existing else True,
             )
-            await interaction.followup.send(
-                embeds=CodexEmbedFactory.build_all(
-                    article,
-                    max_content_images=self.settings.max_images_per_article,
-                ),
-                view=ArticleLinkView(article),
+            await self._send_interaction_article(
+                interaction,
+                article,
                 ephemeral=True,
             )
         except Exception:
@@ -652,11 +669,6 @@ class CodexNews(commands.Cog):
         embed.add_field(
             name="Catégories",
             value=str(category_count),
-            inline=True,
-        )
-        embed.add_field(
-            name="Visuels par article",
-            value=str(self.settings.max_images_per_article),
             inline=True,
         )
         embed.add_field(
