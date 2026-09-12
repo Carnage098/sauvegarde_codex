@@ -90,7 +90,10 @@ class CodexNews(commands.Cog):
 
         return await channel.send(
             content=content,
-            embed=CodexEmbedFactory.build(article),
+            embeds=CodexEmbedFactory.build_all(
+                article,
+                max_content_images=self.settings.max_images_per_article,
+            ),
             view=ArticleLinkView(article),
             allowed_mentions=discord.AllowedMentions(
                 roles=True,
@@ -311,7 +314,10 @@ class CodexNews(commands.Cog):
                 announced=None if existing else True,
             )
             await interaction.followup.send(
-                embed=CodexEmbedFactory.build(article),
+                embeds=CodexEmbedFactory.build_all(
+                    article,
+                    max_content_images=self.settings.max_images_per_article,
+                ),
                 view=ArticleLinkView(article),
                 ephemeral=True,
             )
@@ -377,7 +383,10 @@ class CodexNews(commands.Cog):
             return
 
         await interaction.response.send_message(
-            embed=CodexEmbedFactory.build(record.article),
+            embeds=CodexEmbedFactory.build_all(
+                record.article,
+                max_content_images=self.settings.max_images_per_article,
+            ),
             view=ArticleLinkView(record.article),
         )
 
@@ -599,7 +608,10 @@ class CodexNews(commands.Cog):
                 announced=None if existing else True,
             )
             await interaction.followup.send(
-                embed=CodexEmbedFactory.build(article),
+                embeds=CodexEmbedFactory.build_all(
+                    article,
+                    max_content_images=self.settings.max_images_per_article,
+                ),
                 view=ArticleLinkView(article),
                 ephemeral=True,
             )
@@ -640,6 +652,11 @@ class CodexNews(commands.Cog):
         embed.add_field(
             name="Catégories",
             value=str(category_count),
+            inline=True,
+        )
+        embed.add_field(
+            name="Visuels par article",
+            value=str(self.settings.max_images_per_article),
             inline=True,
         )
         embed.add_field(

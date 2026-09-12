@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -70,7 +71,8 @@ class ArticleRepository:
                 is_premium INTEGER NOT NULL DEFAULT 0,
                 announced INTEGER NOT NULL DEFAULT 0,
                 discord_message_id TEXT,
-                search_text TEXT NOT NULL DEFAULT ''
+                search_text TEXT NOT NULL DEFAULT '',
+                content_image_urls TEXT NOT NULL DEFAULT '[]'
             );
 
             CREATE TABLE IF NOT EXISTS categories (
@@ -104,6 +106,7 @@ class ArticleRepository:
             """
         )
 
+        await self._migrate_article_columns()
         await self._migrate_legacy_table()
         await self._database.commit()
 
@@ -124,6 +127,30 @@ class ArticleRepository:
             (table_name,),
         ) as cursor:
             return await cursor.fetchone() is not None
+
+    async def _migrate_article_columns(self) -> None:
+        """Ajoute les colonnes récentes sans réinitialiser la base Railway."""
+        database = self._require_database()
+        async with database.execute("PRAGMA table_info(articles)") as cursor:
+            columns = {str(row["name"]) for row in await cursor.fetchall()}
+
+        if "content_image_urls" not in columns:
+            await database.execute(
+                "ALTER TABLE articles "
+                "ADD COLUMN content_image_urls TEXT NOT NULL DEFAULT '[]'"
+            )
+
+    @staticmethod
+    def _decode_image_urls(value: object) -> tuple[str, ...]:
+        if not value:
+            return ()
+        try:
+            decoded = json.loads(str(value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ()
+        if not isinstance(decoded, list):
+            return ()
+        return tuple(item for item in decoded if isinstance(item, str) and item)
 
     async def _migrate_legacy_table(self) -> None:
         """Importe une seule fois l'ancienne table anti-doublon."""
@@ -246,7 +273,8 @@ class ArticleRepository:
         async with database.execute(
             """
             SELECT id, title, description, image_url, author, published_at,
-                   is_premium, announced, discord_message_id
+                   is_premium, announced, discord_message_id,
+                   content_image_urls
             FROM articles
             WHERE url = ?
             """,
@@ -279,6 +307,10 @@ class ArticleRepository:
                 is_premium=(
                     article.is_premium or bool(existing["is_premium"])
                 ),
+                content_image_urls=(
+                    article.content_image_urls
+                    or self._decode_image_urls(existing["content_image_urls"])
+                ),
             )
 
         published_at = (
@@ -294,8 +326,9 @@ class ArticleRepository:
                 INSERT INTO articles(
                     url, title, description, image_url, author,
                     published_at, detected_at, updated_at, is_premium,
-                    announced, discord_message_id, search_text
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    announced, discord_message_id, search_text,
+                    content_image_urls
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     final_article.url,
@@ -310,6 +343,7 @@ class ArticleRepository:
                     int(bool(announced)),
                     str(discord_message_id) if discord_message_id else None,
                     search_text,
+                    json.dumps(final_article.content_image_urls),
                 ),
             )
             article_id = int(cursor.lastrowid)
@@ -329,7 +363,8 @@ class ArticleRepository:
                 SET title = ?, description = ?, image_url = ?, author = ?,
                     published_at = COALESCE(?, published_at),
                     updated_at = ?, is_premium = ?, announced = ?,
-                    discord_message_id = ?, search_text = ?
+                    discord_message_id = ?, search_text = ?,
+                    content_image_urls = ?
                 WHERE id = ?
                 """,
                 (
@@ -343,6 +378,7 @@ class ArticleRepository:
                     int(final_announced),
                     final_message_id,
                     search_text,
+                    json.dumps(final_article.content_image_urls),
                     article_id,
                 ),
             )
@@ -550,6 +586,9 @@ class ArticleRepository:
                         categories=categories_by_id.get(article_id, ()),
                         published_at=_parse_datetime(row["published_at"]),
                         is_premium=bool(row["is_premium"]),
+                        content_image_urls=self._decode_image_urls(
+                            row["content_image_urls"]
+                        ),
                     ),
                     announced=bool(row["announced"]),
                     detected_at=_parse_datetime(row["detected_at"]),

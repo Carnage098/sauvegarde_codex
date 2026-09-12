@@ -29,6 +29,10 @@ class ArticleRepositoryTests(unittest.IsolatedAsyncioTestCase):
             author="Joeri_sama",
             categories=("Dossiers", "Rulings"),
             published_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            content_image_urls=(
+                "https://codexygo.fr/images/carte-1.webp",
+                "https://codexygo.fr/images/carte-2.webp",
+            ),
         )
 
         article_id, created = await self.repository.upsert(
@@ -41,6 +45,7 @@ class ArticleRepositoryTests(unittest.IsolatedAsyncioTestCase):
         results = await self.repository.search("theorealisation accalmie")
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].article.title, article.title)
+        self.assertEqual(results[0].article.content_image_urls, article.content_image_urls)
 
         category_results = await self.repository.search(
             "correction",
@@ -98,6 +103,72 @@ class ArticleRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LegacyMigrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_content_images_column_is_added_to_existing_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "old-library.sqlite3"
+            connection = sqlite3.connect(database_path)
+            connection.execute(
+                """
+                CREATE TABLE articles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    image_url TEXT,
+                    author TEXT,
+                    published_at TEXT,
+                    detected_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    is_premium INTEGER NOT NULL DEFAULT 0,
+                    announced INTEGER NOT NULL DEFAULT 0,
+                    discord_message_id TEXT,
+                    search_text TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            now = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """
+                INSERT INTO articles(url, title, detected_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    "https://codexygo.fr/article/ancienne-base/",
+                    "Article existant",
+                    now,
+                    now,
+                ),
+            )
+            connection.commit()
+            connection.close()
+
+            repository = ArticleRepository(database_path)
+            await repository.connect()
+            record = await repository.get_by_url(
+                "https://codexygo.fr/article/ancienne-base/"
+            )
+
+            self.assertIsNotNone(record)
+            self.assertEqual(record.article.content_image_urls, ())
+
+            await repository.upsert(
+                CodexArticle(
+                    title="Article existant",
+                    url="https://codexygo.fr/article/ancienne-base/",
+                    content_image_urls=(
+                        "https://codexygo.fr/images/nouveau-visuel.webp",
+                    ),
+                )
+            )
+            updated = await repository.get_by_url(
+                "https://codexygo.fr/article/ancienne-base/"
+            )
+            self.assertEqual(
+                updated.article.content_image_urls,
+                ("https://codexygo.fr/images/nouveau-visuel.webp",),
+            )
+            await repository.close()
+
     async def test_legacy_table_is_migrated_only_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "legacy.sqlite3"
