@@ -30,6 +30,26 @@ class CodexEmbedFactoryTests(unittest.TestCase):
         )
         self.assertIn("Visuel 23/23", embeds[-1].footer.text)
 
+    def test_build_all_hides_cover_and_resized_duplicates(self) -> None:
+        article = CodexArticle(
+            title="Article avec doublons",
+            url="https://codexygo.fr/article/test/",
+            image_url="https://codexygo.fr/images/carte.png.webp",
+            content_image_urls=(
+                "https://codexygo.fr/images/carte-768x432.png.webp?width=768",
+                "https://codexygo.fr/images/autre.webp?width=1200",
+                "https://codexygo.fr/images/autre.webp?width=600",
+            ),
+        )
+
+        embeds = CodexEmbedFactory.build_all(article)
+
+        self.assertEqual(len(embeds), 2)
+        self.assertEqual(
+            embeds[1].image.url,
+            "https://codexygo.fr/images/autre.webp?width=1200",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

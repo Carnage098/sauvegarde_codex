@@ -122,6 +122,7 @@ class CodexParserTests(unittest.TestCase):
               <article>
                 <img src="/images/couverture.webp" width="1200" height="630">
                 <img data-src="/images/carte-1.png.webp" width="1920" height="1080">
+                <img src="/images/carte-1-768x432.png.webp?width=768">
                 <img src="/images/icon-share.png" width="32" height="32">
                 <img srcset="/images/carte-2-small.webp 400w,
                              /images/carte-2.webp 1200w" alt="Illustration étendue">

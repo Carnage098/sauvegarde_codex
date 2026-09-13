@@ -21,6 +21,7 @@ from playwright.async_api import (
 )
 
 from models.article import CodexArticle
+from services.image_utils import canonical_image_key
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1004,9 +1005,9 @@ class CodexClient:
         if not containers and soup.body is not None:
             containers = [soup.body]
 
-        excluded_urls = {cover_url} if cover_url else set()
+        excluded_keys = {canonical_image_key(cover_url)} if cover_url else set()
         collected: list[str] = []
-        seen: set[str] = set()
+        seen_keys: set[str] = set()
 
         for container in containers:
             for element in container.find_all("img"):
@@ -1042,10 +1043,11 @@ class CodexClient:
                     continue
 
                 normalized = urlunparse(parsed._replace(fragment=""))
-                if normalized in excluded_urls or normalized in seen:
+                image_key = canonical_image_key(normalized)
+                if image_key in excluded_keys or image_key in seen_keys:
                     continue
 
-                seen.add(normalized)
+                seen_keys.add(image_key)
                 collected.append(normalized)
 
         return tuple(collected)
