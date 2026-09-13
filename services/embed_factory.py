@@ -7,6 +7,7 @@ import discord
 
 from models.article import CodexArticle
 from services.codex_client import CODEX_BASE_URL
+from services.image_utils import unique_image_urls
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +100,10 @@ class CodexEmbedFactory:
     ) -> list[discord.Embed]:
         """Construit l'embed principal puis une galerie de visuels internes."""
         embeds = [cls.build(article)]
-        image_urls = article.content_image_urls
+        image_urls = unique_image_urls(
+            article.content_image_urls,
+            excluded_urls=(article.image_url,) if article.image_url else (),
+        )
         if not image_urls:
             return embeds
 
